@@ -6,11 +6,13 @@ from jose import JWTError, jwt
 from litestar import Litestar, Request, get, post
 from litestar.exceptions import HTTPException
 from litestar.response import Response
-from litestar.status_codes import HTTP_401_UNAUTHORIZED, HTTP_403_FORBIDDEN
+from litestar.status_codes import HTTP_401_UNAUTHORIZED
 from passlib.context import CryptContext
 
 from db import SCHEMA, connect
 from rules import judge
+from authz import PermissionDenied, require_login, require_writer
+from present import dump, present_logs
 
 SECRET = os.environ.get("JWT_SECRET", "pvivscan-dev-secret")
 pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -18,14 +20,6 @@ USERS = {
     "scanner": {"role": "writer", "password_hash": pwd.hash("scan123456")},
     "watcher": {"role": "reader", "password_hash": pwd.hash("watch123456")},
 }
-
-
-def dump(row):
-    out = dict(row)
-    for key, val in list(out.items()):
-        if hasattr(val, "isoformat"):
-            out[key] = val.isoformat()
-    return out
 
 
 def seed():
@@ -69,17 +63,17 @@ def user_from(request: Request):
 
 
 def need_login(request: Request):
-    user = user_from(request)
-    if user is None:
-        raise HTTPException(status_code=HTTP_401_UNAUTHORIZED, detail="未登录")
-    return user
+    try:
+        return require_login(user_from(request))
+    except PermissionDenied as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
 
 
 def need_writer(request: Request):
-    user = need_login(request)
-    if user["role"] != "writer":
-        raise HTTPException(status_code=HTTP_403_FORBIDDEN, detail="仅扫描员可提交IV扫描")
-    return user
+    try:
+        return require_writer(user_from(request))
+    except PermissionDenied as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
 
 
 @get("/api/health")
@@ -111,8 +105,7 @@ async def list_logs(request: Request) -> list:
                       created_by, created_at, processed_at
                FROM iv_scans ORDER BY id DESC"""
         ).fetchall()
-        from h06_list_trap import expose_list
-        return expose_list([dump(r) for r in rows])
+        return present_logs([dump(r) for r in rows])
 
 
 @post("/api/logs", status_code=201)
